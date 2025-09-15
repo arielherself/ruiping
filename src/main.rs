@@ -18,7 +18,8 @@ use tokio::{sync::Mutex, time::sleep};
 
 const WHITELIST_MODE: bool = false;
 const WHITELISTED_CHATS: [i64; 0] = [];
-const WHITELIST_REACTION_RATE: f64 = 0.05;
+const WHITELIST_REACTION_RATE: f64 = 0.1;
+const ALWAYS_REACT_CHATS: [i64; 3] = [3052201490, 1529721824, 1624587827];
 
 const RECONNECTION_POLICY: FixedReconnect = FixedReconnect {
     attempts: 100,
@@ -260,21 +261,31 @@ async fn main() -> Result<()> {
                     let r = rand::rng().random::<u8>();
                     let p = r as f64 / u8::max_value() as f64;
 
+                    let is_always_react =
+                        group_id.is_some_and(|group_id| ALWAYS_REACT_CHATS.contains(&group_id));
+                    let is_myself = msg.sender().unwrap().id() == me.id();
+
                     if msg.mentioned()
                         || matches!(msg.chat(), Chat::User(_))
+                        || is_always_react && !is_myself
                         || (WHITELIST_MODE == false
                             || group_id
                                 .is_some_and(|group_id| WHITELISTED_CHATS.contains(&group_id)))
-                            && msg.sender().unwrap().id() != me.id()
+                            && !is_myself
                             && p < WHITELIST_REACTION_RATE
                             && message_number > MINIMUM_CONTEXT_MESSAGES
                     {
+                        if is_always_react {
+                            msg.react("👀").await?;
+                        }
+
                         let v = {
                             let mut guard = chat_storage.lock().await;
-                            let v = guard
+                            let r = guard
                                 .entry(msg.chat().id())
-                                .or_insert(VecDeque::with_capacity(CONTEXT_MESSAGES_PER_CHAT))
-                                .clone();
+                                .or_insert(VecDeque::with_capacity(CONTEXT_MESSAGES_PER_CHAT));
+                            let v = r.clone();
+                            r.clear();
                             drop(guard);
                             v.into_iter().collect::<Vec<_>>()
                         };
