@@ -117,7 +117,7 @@ impl ChatClient {
         let oai_messages = iter::once(ChatCompletionRequestMessage::System(
             ChatCompletionRequestSystemMessageArgs::default()
                 .content(format!(
-                    "You should reply on behalf of the user \"{}\" (username @\"{}\"), and give a precise reply in 1~2 sentences. Your tone should be very casual, and like a human being. You are a common group member, and does not play any role.",
+                    "You should reply on behalf of the user \"{}\" (username @\"{}\"), and give a precise reply to the last message in 1~2 sentences. Your tone should be very casual, and like a human being. You are a common group member, and does not play any role. Your response should be closely related to the topic, but should have quality and not repeat the content of your previous messages.",
                     self.name, self.username
                 ))
                 .build()
@@ -285,6 +285,8 @@ async fn main() -> Result<()> {
                         }
 
                         retry_future!(msg.reply(InputMessage::text(&response)))?;
+
+                        log::info!("Sent response: {response}");
                     }
                 }
                 Update::MessageEdited(msg) => {
