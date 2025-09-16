@@ -378,7 +378,7 @@ async fn main() -> Result<()> {
                                     .entry(msg.chat().id())
                                     .or_insert(VecDeque::with_capacity(CONTEXT_MESSAGES_PER_CHAT));
                                 let v = r.clone();
-                                r.clear();
+                                // r.clear();
                                 drop(guard);
                                 v.into_iter().collect::<Vec<_>>()
                             };
