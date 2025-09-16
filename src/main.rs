@@ -23,7 +23,7 @@ const APP_VERSION: &str = "0.1.0";
 
 const WHITELIST_MODE: bool = true;
 const WHITELISTED_CHATS: [i64; 2] = [1262613096, 1154500568];
-const WHITELISTED_COMMENT_CHATS: [i64; 3] = [1262613096, 3049292659, 1154500568];
+const WHITELISTED_COMMENT_CHATS: [i64; 4] = [1262613096, 3049292659, 1154500568, 1774747260];
 const WHITELIST_REACTION_RATE: f64 = 0.1;
 const ALWAYS_REACT_CHATS: [i64; 3] = [3052201490, 1529721824, 1624587827];
 
@@ -44,7 +44,8 @@ const DOCUMENTATION: &str = formatcp!(
 全自动水群、频道评论 https://github.com/arielherself/ruiping
 
 支持指令：
-  `rep` 一键复读
+  `rep`       一键复读
+  `complete`  接话
 "
 );
 
@@ -139,7 +140,7 @@ impl ChatClient {
         let oai_messages = iter::once(ChatCompletionRequestMessage::System(
             ChatCompletionRequestSystemMessageArgs::default()
                 .content(format!(
-                    "You should reply on behalf of the user \"{}\" (username @\"{}\"), and give a precise reply to the last message in 1~2 sentences in the language of the chat. Your tone should be very casual, and you are a human being. You are a common group member, and does not play any role. Your response should be interesting and closely related to the topic, but should have quality and DO NOT REPEAT the content of the previous chat.",
+                    "You should reply on behalf of the user \"{}\" (username @\"{}\"), and give a precise reply to the last message in 1~2 sentences in the language of the chat. Your tone should be very casual, and you are a human being. You are a common group member, and does not play any role. Your response should be interesting and closely related to the topic, but should have quality and DO NOT REPEAT the content of the previous chat. Text in brackets is information for you, don't include it in your response.",
                     self.name, self.username
                 ))
                 .build()
@@ -308,6 +309,17 @@ async fn main() -> Result<()> {
                                         String::new()
                                     }
                                     None => String::from("请回复要复读的消息"),
+                                }
+                            }
+                            "complete" => {
+                                let origin = msg.get_reply().await?;
+                                match origin {
+                                    Some(origin) => {
+                                        chat_client
+                                            .query(&[Message::from(&origin).await?.unwrap()])
+                                            .await?
+                                    }
+                                    None => String::from("请回复要接话的消息"),
                                 }
                             }
                             _ => format!("未知指令 `{cmd}`"),
