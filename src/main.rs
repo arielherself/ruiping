@@ -74,6 +74,7 @@ fn get_env(name: &str) -> Result<String> {
 
 #[derive(Clone, Debug)]
 struct Message {
+    id: i32,
     username: String,
     content: String,
 }
@@ -108,6 +109,7 @@ impl Message {
             content_prefix += "[Sent a media]";
         }
         Ok(Some(Self {
+            id: value.id(),
             username,
             content: format!("{content_prefix}{}", value.text()),
         }))
@@ -267,7 +269,9 @@ async fn main() -> Result<()> {
 
                     let message = Message::from(&msg).await?;
                     let mut message_number = 0;
-                    if let Some(message) = message {
+                    if let Some(message) = message
+                        && !msg.text().starts_with(',')
+                    {
                         let mut guard = chat_storage.lock().await;
                         let v = guard
                             .entry(msg.chat().id())
@@ -279,6 +283,8 @@ async fn main() -> Result<()> {
                         message_number = v.len();
                         drop(guard);
                     }
+
+                    let mut manual_ai_on = false;
 
                     'command_handler: {
                         let text = msg.text();
@@ -298,7 +304,6 @@ async fn main() -> Result<()> {
                                 let origin = msg.get_reply().await?;
                                 match origin {
                                     Some(origin) => {
-                                        msg.delete().await?;
                                         client
                                             .forward_messages(
                                                 msg.chat(),
@@ -319,13 +324,18 @@ async fn main() -> Result<()> {
                                             .query(&[Message::from(&origin).await?.unwrap()])
                                             .await?
                                     }
-                                    None => String::from("请回复要接话的消息"),
+                                    None => {
+                                        manual_ai_on = true;
+                                        String::new()
+                                    }
                                 }
                             }
                             _ => format!("未知指令 `{cmd}`"),
                         };
                         if !response_text.is_empty() {
                             msg.edit(InputMessage::text(response_text)).await?;
+                        } else {
+                            msg.delete().await?;
                         }
                     }
 
@@ -342,22 +352,23 @@ async fn main() -> Result<()> {
                             group_id.is_some_and(|group_id| ALWAYS_REACT_CHATS.contains(&group_id));
                         let is_myself = msg.sender().unwrap().id() == me.id();
 
-                        if !is_myself
-                            && (msg.mentioned()
-                                || matches!(msg.chat(), Chat::User(_))
-                                || is_always_react && !is_myself
-                                || (WHITELIST_MODE == false
+                        if manual_ai_on
+                            || !is_myself
+                                && (msg.mentioned()
+                                    || matches!(msg.chat(), Chat::User(_))
+                                    || is_always_react && !is_myself
+                                    || (WHITELIST_MODE == false
+                                        || group_id.is_some_and(|group_id| {
+                                            WHITELISTED_CHATS.contains(&group_id)
+                                        }))
+                                        && p < WHITELIST_REACTION_RATE
+                                        && message_number > MINIMUM_CONTEXT_MESSAGES
                                     || group_id.is_some_and(|group_id| {
-                                        WHITELISTED_CHATS.contains(&group_id)
-                                    }))
-                                    && p < WHITELIST_REACTION_RATE
-                                    && message_number > MINIMUM_CONTEXT_MESSAGES
-                                || group_id.is_some_and(|group_id| {
-                                    WHITELISTED_COMMENT_CHATS.contains(&group_id)
-                                }) && matches!(msg.sender().unwrap(), Chat::Channel(_)))
+                                        WHITELISTED_COMMENT_CHATS.contains(&group_id)
+                                    }) && matches!(msg.sender().unwrap(), Chat::Channel(_)))
                         {
                             if is_always_react {
-                                msg.react("👀").await?;
+                                let _ = msg.react("👀").await;
                             }
 
                             let v = {
@@ -371,19 +382,24 @@ async fn main() -> Result<()> {
                                 v.into_iter().collect::<Vec<_>>()
                             };
 
-                            let generate_response = async {
-                                let mut response = chat_client.query(&v).await?;
-                                if response.is_empty() {
-                                    response = String::from("。。。");
-                                }
+                            tokio::pin! {
+                                let generate_response = async {
+                                    let mut response = chat_client.query(&v).await?;
+                                    if response.is_empty() {
+                                        response = String::from("。。。");
+                                    }
 
-                                retry_future!(msg.reply(InputMessage::text(&response)))?;
+                                    if manual_ai_on {
+                                        retry_future!(client.send_message(msg.chat(), InputMessage::text(&response)))?;
+                                    } else {
+                                        retry_future!(msg.reply(InputMessage::text(&response)))?;
+                                    }
 
-                                log::info!("Sent response: {response}");
+                                    log::info!("Sent response: {response}");
 
-                                Result::<()>::Ok(())
-                            };
-                            tokio::pin!(generate_response);
+                                    Result::<()>::Ok(())
+                                };
+                            }
 
                             client
                                 .action(msg.chat())
@@ -398,6 +414,21 @@ async fn main() -> Result<()> {
                 }
                 Update::MessageEdited(msg) => {
                     log::debug!("Message edited {}: {}", msg.id(), msg.text());
+
+                    let mut guard = chat_storage.lock().await;
+                    let v = guard
+                        .entry(msg.chat().id())
+                        .or_insert(VecDeque::with_capacity(CONTEXT_MESSAGES_PER_CHAT));
+                    let it = v.iter_mut().find(|x| x.id == msg.id());
+                    if let Some(raw_msg) = it {
+                        raw_msg.content = msg.text().to_string();
+                    } else {
+                        v.push_back(Message::from(&msg).await?.unwrap());
+
+                        if v.len() > CONTEXT_MESSAGES_PER_CHAT {
+                            v.pop_front();
+                        }
+                    }
                 }
                 Update::MessageDeleted(msg) => {
                     log::debug!("Message deleted {:?}", msg.into_messages());
