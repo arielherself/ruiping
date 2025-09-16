@@ -21,10 +21,10 @@ use tokio::{sync::Mutex, time::sleep};
 
 const APP_VERSION: &str = "0.1.0";
 
-const WHITELIST_MODE: bool = true;
+const WHITELIST_MODE: bool = false;
 const WHITELISTED_CHATS: [i64; 2] = [1262613096, 1154500568];
 const WHITELISTED_COMMENT_CHATS: [i64; 4] = [1262613096, 3049292659, 1154500568, 1774747260];
-const WHITELIST_REACTION_RATE: f64 = 0.1;
+const WHITELIST_REACTION_RATE: f64 = 0.01;
 const ALWAYS_REACT_CHATS: [i64; 2] = [3052201490, 1529721824];
 
 const RECONNECTION_POLICY: FixedReconnect = FixedReconnect {
@@ -186,6 +186,7 @@ impl ChatClient {
             }
 
             log::warn!("Empty message is generated");
+            sleep(Duration::from_secs(5)).await;
         }
 
         Ok(String::new())
