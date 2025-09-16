@@ -342,18 +342,19 @@ async fn main() -> Result<()> {
                             group_id.is_some_and(|group_id| ALWAYS_REACT_CHATS.contains(&group_id));
                         let is_myself = msg.sender().unwrap().id() == me.id();
 
-                        if msg.mentioned()
-                            || matches!(msg.chat(), Chat::User(_))
-                            || is_always_react && !is_myself
-                            || (WHITELIST_MODE == false
-                                || group_id
-                                    .is_some_and(|group_id| WHITELISTED_CHATS.contains(&group_id)))
-                                && !is_myself
-                                && p < WHITELIST_REACTION_RATE
-                                && message_number > MINIMUM_CONTEXT_MESSAGES
-                            || group_id.is_some_and(|group_id| {
-                                WHITELISTED_COMMENT_CHATS.contains(&group_id)
-                            }) && matches!(msg.sender().unwrap(), Chat::Channel(_))
+                        if !is_myself
+                            && (msg.mentioned()
+                                || matches!(msg.chat(), Chat::User(_))
+                                || is_always_react && !is_myself
+                                || (WHITELIST_MODE == false
+                                    || group_id.is_some_and(|group_id| {
+                                        WHITELISTED_CHATS.contains(&group_id)
+                                    }))
+                                    && p < WHITELIST_REACTION_RATE
+                                    && message_number > MINIMUM_CONTEXT_MESSAGES
+                                || group_id.is_some_and(|group_id| {
+                                    WHITELISTED_COMMENT_CHATS.contains(&group_id)
+                                }) && matches!(msg.sender().unwrap(), Chat::Channel(_)))
                         {
                             if is_always_react {
                                 msg.react("👀").await?;
