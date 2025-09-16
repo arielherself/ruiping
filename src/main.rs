@@ -1,3 +1,4 @@
+#![allow(unused_labels)]
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 use std::{env, iter, sync::Arc};
@@ -8,6 +9,7 @@ use async_openai::types::{
     ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs,
 };
 use async_openai::{Client as OAIClient, config::OpenAIConfig};
+use const_format::formatcp;
 use grammers_client::grammers_tl_types::enums::SendMessageAction;
 use grammers_client::types::Chat;
 use grammers_client::{
@@ -17,9 +19,11 @@ use inquire::Text;
 use rand::Rng;
 use tokio::{sync::Mutex, time::sleep};
 
+const APP_VERSION: &str = "0.1.0";
+
 const WHITELIST_MODE: bool = true;
 const WHITELISTED_CHATS: [i64; 2] = [1262613096, 1154500568];
-const WHITELISTED_COMMENT_CHATS: [i64; 2] = [1262613096, 3049292659];
+const WHITELISTED_COMMENT_CHATS: [i64; 3] = [1262613096, 3049292659, 1154500568];
 const WHITELIST_REACTION_RATE: f64 = 0.1;
 const ALWAYS_REACT_CHATS: [i64; 3] = [3052201490, 1529721824, 1624587827];
 
@@ -34,6 +38,15 @@ const CONTEXT_MESSAGES_PER_CHAT: usize = 50;
 const MINIMUM_CONTEXT_MESSAGES: usize = 20;
 const OPENAI_MODEL: &str = "deepseek-v3.1";
 const SESSION_FILE: &str = ".ruiping-session";
+
+const DOCUMENTATION: &str = formatcp!(
+    "Ruiping version {APP_VERSION}
+全自动水群、频道评论 https://github.com/arielherself/ruiping
+
+支持指令：
+  `rep` 一键复读
+"
+);
 
 macro_rules! retry_future {
     ($future:expr) => {{
@@ -196,8 +209,8 @@ async fn main() -> Result<()> {
             api_hash,
             params: InitParams {
                 device_model: String::from("Ruiping Headless"),
-                system_version: String::from("0.1.0"),
-                app_version: String::from("0.1.0"),
+                system_version: String::from(APP_VERSION),
+                app_version: String::from(APP_VERSION),
                 system_lang_code: String::from("C"),
                 lang_code: String::from("C"),
                 catch_up: false,
@@ -266,68 +279,108 @@ async fn main() -> Result<()> {
                         drop(guard);
                     }
 
-                    let group_id = match msg.chat() {
-                        Chat::Group(group) => Some(group.id()),
-                        _ => None,
-                    };
-
-                    let r = rand::rng().random::<u8>();
-                    let p = r as f64 / u8::max_value() as f64;
-
-                    let is_always_react =
-                        group_id.is_some_and(|group_id| ALWAYS_REACT_CHATS.contains(&group_id));
-                    let is_myself = msg.sender().unwrap().id() == me.id();
-
-                    if msg.mentioned()
-                        || matches!(msg.chat(), Chat::User(_))
-                        || is_always_react && !is_myself
-                        || (WHITELIST_MODE == false
-                            || group_id
-                                .is_some_and(|group_id| WHITELISTED_CHATS.contains(&group_id)))
-                            && !is_myself
-                            && p < WHITELIST_REACTION_RATE
-                            && message_number > MINIMUM_CONTEXT_MESSAGES
-                        || group_id
-                            .is_some_and(|group_id| WHITELISTED_COMMENT_CHATS.contains(&group_id))
-                            && matches!(msg.sender().unwrap(), Chat::Channel(_))
-                    {
-                        if is_always_react {
-                            msg.react("👀").await?;
+                    'command_handler: {
+                        let text = msg.text();
+                        if !msg.outgoing() || !text.starts_with(',') {
+                            break 'command_handler;
                         }
+                        let separator = text.find(' ').unwrap_or(text.len());
+                        let cmd = &text[1..separator];
+                        let arg = if separator == text.len() {
+                            ""
+                        } else {
+                            &text[separator + 1..]
+                        };
+                        let response_text = match cmd {
+                            "info" => String::from(DOCUMENTATION),
+                            "rep" => {
+                                let origin = msg.get_reply().await?;
+                                match origin {
+                                    Some(origin) => {
+                                        msg.delete().await?;
+                                        client
+                                            .forward_messages(
+                                                msg.chat(),
+                                                &[origin.id()],
+                                                origin.chat(),
+                                            )
+                                            .await?;
+                                        String::new()
+                                    }
+                                    None => String::from("请回复要复读的消息"),
+                                }
+                            }
+                            _ => format!("未知指令 `{cmd}`"),
+                        };
+                        if !response_text.is_empty() {
+                            msg.edit(InputMessage::text(response_text)).await?;
+                        }
+                    }
 
-                        let v = {
-                            let mut guard = chat_storage.lock().await;
-                            let r = guard
-                                .entry(msg.chat().id())
-                                .or_insert(VecDeque::with_capacity(CONTEXT_MESSAGES_PER_CHAT));
-                            let v = r.clone();
-                            r.clear();
-                            drop(guard);
-                            v.into_iter().collect::<Vec<_>>()
+                    'ai_response: {
+                        let group_id = match msg.chat() {
+                            Chat::Group(group) => Some(group.id()),
+                            _ => None,
                         };
 
-                        let generate_response = async {
-                            let mut response = chat_client.query(&v).await?;
-                            if response.is_empty() {
-                                response = String::from("。。。");
+                        let r = rand::rng().random::<u8>();
+                        let p = r as f64 / u8::max_value() as f64;
+
+                        let is_always_react =
+                            group_id.is_some_and(|group_id| ALWAYS_REACT_CHATS.contains(&group_id));
+                        let is_myself = msg.sender().unwrap().id() == me.id();
+
+                        if msg.mentioned()
+                            || matches!(msg.chat(), Chat::User(_))
+                            || is_always_react && !is_myself
+                            || (WHITELIST_MODE == false
+                                || group_id
+                                    .is_some_and(|group_id| WHITELISTED_CHATS.contains(&group_id)))
+                                && !is_myself
+                                && p < WHITELIST_REACTION_RATE
+                                && message_number > MINIMUM_CONTEXT_MESSAGES
+                            || group_id.is_some_and(|group_id| {
+                                WHITELISTED_COMMENT_CHATS.contains(&group_id)
+                            }) && matches!(msg.sender().unwrap(), Chat::Channel(_))
+                        {
+                            if is_always_react {
+                                msg.react("👀").await?;
                             }
 
-                            retry_future!(msg.reply(InputMessage::text(&response)))?;
+                            let v = {
+                                let mut guard = chat_storage.lock().await;
+                                let r = guard
+                                    .entry(msg.chat().id())
+                                    .or_insert(VecDeque::with_capacity(CONTEXT_MESSAGES_PER_CHAT));
+                                let v = r.clone();
+                                r.clear();
+                                drop(guard);
+                                v.into_iter().collect::<Vec<_>>()
+                            };
 
-                            log::info!("Sent response: {response}");
+                            let generate_response = async {
+                                let mut response = chat_client.query(&v).await?;
+                                if response.is_empty() {
+                                    response = String::from("。。。");
+                                }
 
-                            Result::<()>::Ok(())
-                        };
-                        tokio::pin!(generate_response);
+                                retry_future!(msg.reply(InputMessage::text(&response)))?;
 
-                        client
-                            .action(msg.chat())
-                            .repeat(
-                                || SendMessageAction::SendMessageTypingAction,
-                                generate_response,
-                            )
-                            .await
-                            .0?;
+                                log::info!("Sent response: {response}");
+
+                                Result::<()>::Ok(())
+                            };
+                            tokio::pin!(generate_response);
+
+                            client
+                                .action(msg.chat())
+                                .repeat(
+                                    || SendMessageAction::SendMessageTypingAction,
+                                    generate_response,
+                                )
+                                .await
+                                .0?;
+                        }
                     }
                 }
                 Update::MessageEdited(msg) => {
