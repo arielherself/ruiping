@@ -8,6 +8,7 @@ use async_openai::types::{
     ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs,
 };
 use async_openai::{Client as OAIClient, config::OpenAIConfig};
+use grammers_client::grammers_tl_types::enums::SendMessageAction;
 use grammers_client::types::Chat;
 use grammers_client::{
     Client, Config, FixedReconnect, InitParams, InputMessage, SignInError, Update, session::Session,
@@ -16,8 +17,9 @@ use inquire::Text;
 use rand::Rng;
 use tokio::{sync::Mutex, time::sleep};
 
-const WHITELIST_MODE: bool = false;
-const WHITELISTED_CHATS: [i64; 0] = [];
+const WHITELIST_MODE: bool = true;
+const WHITELISTED_CHATS: [i64; 2] = [1262613096, 1154500568];
+const WHITELISTED_COMMENT_CHATS: [i64; 2] = [1262613096, 3049292659];
 const WHITELIST_REACTION_RATE: f64 = 0.1;
 const ALWAYS_REACT_CHATS: [i64; 3] = [3052201490, 1529721824, 1624587827];
 
@@ -30,7 +32,7 @@ const MAX_RETRY: usize = 2;
 const MAX_TOKENS: u32 = 2000;
 const CONTEXT_MESSAGES_PER_CHAT: usize = 50;
 const MINIMUM_CONTEXT_MESSAGES: usize = 20;
-const OPENAI_MODEL: &str = "gpt-5-nano-2025-08-07";
+const OPENAI_MODEL: &str = "deepseek-v3.1";
 const SESSION_FILE: &str = ".ruiping-session";
 
 macro_rules! retry_future {
@@ -64,16 +66,22 @@ struct Message {
 
 impl Message {
     async fn from(value: &grammers_client::types::Message) -> Result<Option<Self>> {
-        let sender = match value.sender().unwrap() {
-            Chat::User(user) => user,
+        let (name, username) = match value.sender().unwrap() {
+            Chat::User(user) => (
+                user.full_name(),
+                user.username()
+                    .unwrap_or(&user.id().to_string())
+                    .to_string(),
+            ),
+            Chat::Channel(channel) => (
+                channel.title().to_string(),
+                channel
+                    .username()
+                    .unwrap_or(&channel.id().to_string())
+                    .to_string(),
+            ),
             _ => return Ok(None),
         };
-        let uid = sender.id();
-        let name = sender.full_name();
-        let username = sender
-            .username()
-            .unwrap_or(uid.to_string().as_str())
-            .to_string();
         let mut content_prefix = format!("[Name: {name}]");
         if let Some(origin) = value.get_reply().await? {
             let origin_sender = match origin.sender().unwrap() {
@@ -118,7 +126,7 @@ impl ChatClient {
         let oai_messages = iter::once(ChatCompletionRequestMessage::System(
             ChatCompletionRequestSystemMessageArgs::default()
                 .content(format!(
-                    "You should reply on behalf of the user \"{}\" (username @\"{}\"), and give a precise reply to the last message in 1~2 sentences. Your tone should be very casual, and like a human being. You are a common group member, and does not play any role. Your response should be closely related to the topic, but should have quality and not repeat the content of your previous messages.",
+                    "You should reply on behalf of the user \"{}\" (username @\"{}\"), and give a precise reply to the last message in 1~2 sentences in the language of the chat. Your tone should be very casual, and you are a human being. You are a common group member, and does not play any role. Your response should be interesting and closely related to the topic, but should have quality and DO NOT REPEAT the content of the previous chat.",
                     self.name, self.username
                 ))
                 .build()
@@ -134,6 +142,8 @@ impl ChatClient {
             )
         }))
         .collect::<Vec<_>>();
+
+        log::debug!("Request: {:#?}", oai_messages);
 
         let oai_request = CreateChatCompletionRequestArgs::default()
             .model(OPENAI_MODEL)
@@ -179,24 +189,26 @@ async fn main() -> Result<()> {
     let api_id = get_env("TELEGRAM_API_ID")?.parse().expect("invalid api id");
     let api_hash = get_env("TELEGRAM_API_HASH")?;
 
-    let client = Client::connect(Config {
-        session: Session::load_file_or_create(SESSION_FILE)?,
-        api_id,
-        api_hash,
-        params: InitParams {
-            device_model: String::from("Ruiping Headless"),
-            system_version: String::from("0.1.0"),
-            app_version: String::from("0.1.0"),
-            system_lang_code: String::from("C"),
-            lang_code: String::from("C"),
-            catch_up: false,
-            server_addr: None,
-            flood_sleep_threshold: 60,
-            update_queue_limit: Some(100),
-            reconnection_policy: &RECONNECTION_POLICY,
-        },
-    })
-    .await?;
+    let client = Arc::new(
+        Client::connect(Config {
+            session: Session::load_file_or_create(SESSION_FILE)?,
+            api_id,
+            api_hash,
+            params: InitParams {
+                device_model: String::from("Ruiping Headless"),
+                system_version: String::from("0.1.0"),
+                app_version: String::from("0.1.0"),
+                system_lang_code: String::from("C"),
+                lang_code: String::from("C"),
+                catch_up: false,
+                server_addr: None,
+                flood_sleep_threshold: 60,
+                update_queue_limit: Some(100),
+                reconnection_policy: &RECONNECTION_POLICY,
+            },
+        })
+        .await?,
+    );
     log::info!("Connected to server");
 
     if !client.is_authorized().await? {
@@ -227,6 +239,7 @@ async fn main() -> Result<()> {
 
     let handle_update = |update: Update| {
         let me = me.clone();
+        let client = Arc::clone(&client);
         let chat_client = Arc::clone(&chat_client);
         let chat_storage = Arc::clone(&chat_storage);
         async move {
@@ -274,6 +287,9 @@ async fn main() -> Result<()> {
                             && !is_myself
                             && p < WHITELIST_REACTION_RATE
                             && message_number > MINIMUM_CONTEXT_MESSAGES
+                        || group_id
+                            .is_some_and(|group_id| WHITELISTED_COMMENT_CHATS.contains(&group_id))
+                            && matches!(msg.sender().unwrap(), Chat::Channel(_))
                     {
                         if is_always_react {
                             msg.react("👀").await?;
@@ -290,14 +306,28 @@ async fn main() -> Result<()> {
                             v.into_iter().collect::<Vec<_>>()
                         };
 
-                        let mut response = chat_client.query(&v).await?;
-                        if response.is_empty() {
-                            response = String::from("。。。");
-                        }
+                        let generate_response = async {
+                            let mut response = chat_client.query(&v).await?;
+                            if response.is_empty() {
+                                response = String::from("。。。");
+                            }
 
-                        retry_future!(msg.reply(InputMessage::text(&response)))?;
+                            retry_future!(msg.reply(InputMessage::text(&response)))?;
 
-                        log::info!("Sent response: {response}");
+                            log::info!("Sent response: {response}");
+
+                            Result::<()>::Ok(())
+                        };
+                        tokio::pin!(generate_response);
+
+                        client
+                            .action(msg.chat())
+                            .repeat(
+                                || SendMessageAction::SendMessageTypingAction,
+                                generate_response,
+                            )
+                            .await
+                            .0?;
                     }
                 }
                 Update::MessageEdited(msg) => {
